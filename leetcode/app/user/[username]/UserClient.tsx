@@ -1,9 +1,8 @@
+
 "use client";
 
 import { useEffect, useState } from "react";
-import Image from "next/image";
 import { useRouter } from "next/navigation";
-
 
 interface LeetCodeProfile {
   username: string;
@@ -11,14 +10,7 @@ interface LeetCodeProfile {
   avatar: string;
   ranking: number;
   reputation: number;
-  country: string;
-  school: string;
-}
-
-interface SuggestedProblem {
-  title: string;
-  difficulty: string;
-  concept: string;
+  school?: string;
 }
 
 interface SolvedProblem {
@@ -27,274 +19,343 @@ interface SolvedProblem {
   statusDisplay: string;
 }
 
+interface SuggestedProblem {
+  title: string;
+  difficulty: string;
+  concept: string;
+}
+
 export default function UserPage({ username }: { username: string }) {
   const router = useRouter();
-  const [showModal, setShowModal] = useState(false);
-  const [newUsername, setNewUsername] = useState("");
-  const handleChangeUser = (e: React.FormEvent) => {
-  e.preventDefault();
-  if (!newUsername.trim()) return;
 
-  setShowModal(false);
-  router.push(`/user/${newUsername}`);
-  };
   const [profile, setProfile] = useState<LeetCodeProfile | null>(null);
-  const [loading, setLoading] = useState(true);
-
   const [solved, setSolved] = useState<SolvedProblem[]>([]);
   const [suggested, setSuggested] = useState<SuggestedProblem[]>([]);
 
-  const [showSuggestions, setShowSuggestions] = useState(false);
-  const [excluded, setExcluded] = useState<string[]>([]);
-
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
 
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+  const [newUsername, setNewUsername] = useState("");
 
+  const [excluded, setExcluded] = useState<string[]>([]);
 
+  // Fetch profile and solved problems
   useEffect(() => {
-    const fetchAllData = async () => {
+    // User of the controller is that it cancel the fetch request when componenet unmounts 
+    const controller = new AbortController();
+
+    async function fetchData() {
+      setLoading(true);
+      setError("");
+
       try {
-        const profileRes = await fetch(
-          `https://alfa-leetcode-api.onrender.com/${username}`
-        );
-        const profileData = await profileRes.json();
+        //we are using Promise.all here to fetch both profile and recent solved problems at the same time
+        // we can also use encodeURIComponent with username so if username contain any space so it enode it to something percentage same as happens in te browser but in our case i am sure that username does not contain any space so i am not going to use it
+        const [profileRes, solvedRes] = await Promise.all([
+          fetch(`https://alfa-leetcode-api.onrender.com/${username}`, {
+            signal: controller.signal,
+          }),
+          fetch(
+            `https://alfa-leetcode-api.onrender.com/${username}/acsubmission`,
+            { signal: controller.signal }
+          ),
+        ]);
+        // here .ok check that server returned a successful http status between range 200-299 or give an bad response
+        if (!profileRes.ok || !solvedRes.ok) {
+          throw new Error("Failed to fetch LeetCode data.");
+        }
+        // Using await here again because in previous fetch we obtain response object may the body still in the route so for the check we do await again
+        const profileData: LeetCodeProfile = await profileRes.json();
+        const solvedData: { submission: SolvedProblem[] } =
+          await solvedRes.json();
+
+        if (!profileData.username) {
+          throw new Error("LeetCode user not found.");
+        }
+
         setProfile(profileData);
+        setSolved(solvedData.submission.slice(0, 10) ?? []);
 
-        const solvedRes = await fetch(
-          `https://alfa-leetcode-api.onrender.com/${username}/acsubmission`
-        );
-        const solvedData = await solvedRes.json();
-        const recentSolved = solvedData.submission.slice(0, 10);
-        setSolved(recentSolved);
-        setExcluded([]); // reset when new user loads
-        fetchSuggestions(recentSolved, []);
-
+        setSuggested([]);
+        setExcluded([]);
       } catch (err) {
-        console.error(err);
+        if (err instanceof Error && err.name === "AbortError") return;
+
+        setError(
+          err instanceof Error ? err.message : "Something went wrong."
+        );
+        setProfile(null);
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
       }
-    };
-    fetchAllData();
+    }
+
+    fetchData();
+
+    return () => controller.abort();
   }, [username]);
 
-  const fetchSuggestions = async (solvedProblems: SolvedProblem[], excludedProblems: string[]) => {
-    try{
-      setSuggestionsLoading(true);
+  // Fetch AI suggestions
+  const fetchSuggestions = async (replace = false) => {
+    if (suggestionsLoading || solved.length === 0) return;
+
+    setSuggestionsLoading(true);
+
+    try {
       const res = await fetch("/api/mistral", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
-          SolvedProblems: solvedProblems.map((p) => p.title),
-          ExcludedProblems: excludedProblems,
+          SolvedProblems: solved.map((p) => p.title),
+          ExcludedProblems: excluded,
         }),
       });
-  
-      const data = await res.json();
-      setSuggested(data.suggestions);
-      const newTitles = data.suggestions.map((s: any) => s.title);
-      setExcluded((prev) => [...prev, ...newTitles]);
-    }catch(error){
-      console.error("Error fetching suggestions:", error);
-    }finally{
+
+      if (!res.ok) {
+        throw new Error("Failed to generate suggestions.");
+      }
+
+      const data: { suggestions?: SuggestedProblem[] } = await res.json();
+      // Here ?? means that return empty array if value is null or not defined
+      const newSuggestions = (data.suggestions ?? []).filter(
+        (problem) =>
+          problem.title &&
+          !excluded.includes(problem.title) &&
+          !solved.some(
+            (solvedProblem) =>
+              solvedProblem.title.toLowerCase() ===
+              problem.title.toLowerCase()
+          )
+      );
+
+      setSuggested(newSuggestions);
+
+      setExcluded((prev) => [
+        ...prev,
+        ...newSuggestions.map((p) => p.title),
+      ]);
+
+    } catch (err) {
+      console.error("Suggestion error:", err);
+    } finally {
       setSuggestionsLoading(false);
     }
   };
 
-  if (loading) return <div className="p-6">Loading...</div>;
-  if (!profile) return <p>User Not Found</p>;
+  // Change username
+  const handleChangeUser = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
 
- return (
-  
-<main className="min-h-screen bg-gray-300 text-black px-4 py-6 md:px-12">
+    const value = newUsername.trim();
 
+    if (!value) return;
 
-    {/* PROFILE CARD */}
-<section className="relative mx-auto max-w-4xl bg-white/80 backdrop-blur-md rounded-2xl shadow-xl border border-white/40
- p-6 md:p-8 flex flex-col sm:flex-row items-center gap-6 transition-all duration-300 hover:shadow-lg">
+    setShowModal(false);
+    router.push(`/user/${value}`);
+  };
 
-  {/* CHANGE USER BUTTON */}
-  <button
-    onClick={() => setShowModal(true)}
-    className="absolute top-4 right-4 px-4 py-1.5 text-sm rounded-full border border-gray-300 bg-white hover:bg-gray-100 transition"
-  >
-    Change User
-  </button>
+  // Loading
+  if (loading) {
+    return <div className="p-6 text-center">Loading...</div>;
+  }
 
-  <Image
-    src={profile.avatar}
-    alt="avatar"
-    width={120}
-    height={120}
-    className="rounded-full border border-gray-300"
-  />
+  // Error
+  if (error || !profile) {
+    return (
+      <div className="p-6 text-center">
+        <p className="text-red-500">
+          {error || "User not found."}
+        </p>
+      </div>
+    );
+  }
 
-  <div className="text-center sm:text-left space-y-1">
-    <h1 className="text-2xl md:text-3xl font-bold tracking-tight">
-      {profile.name}
-    </h1>
+  return (
+    <main className="min-h-screen bg-gray-300 text-black px-4 py-6 md:px-12">
 
-    <p className="text-gray-500">@{profile.username}</p>
+      {/* Profile */}
+      <section className="relative mx-auto max-w-4xl bg-white rounded-2xl p-6 md:p-8 flex flex-col sm:flex-row items-center gap-6">
 
-    <div className="mt-3 flex flex-wrap justify-center sm:justify-start gap-4 text-sm text-gray-700">
+        <button
+          onClick={() => setShowModal(true)}
+          className="static sm:absolute top-4 right-4 px-4 py-2 text-sm rounded-full border hover:bg-gray-100"
+        >
+          Change User
+        </button>
 
-      <span>🌍 Rank: {profile.ranking}</span>
-      <span>⭐ {profile.reputation}</span>
+        {/* We user && here because we not want to render the image if profile.avtar is empty */}
+        {profile.avatar && (
+          <img
+            src={profile.avatar}
+            alt={`${profile.username}'s avatar`}
+            width={120}
+            height={120}
+            />
+        )}
 
-      {profile.school && <span>🏫 {profile.school}</span>}
+        <div className="text-center sm:text-left">
+          <h1 className="text-2xl md:text-3xl font-bold">
+            {profile.name || profile.username}
+          </h1>
 
-    </div>
-  </div>
+          <p className="text-gray-500">@{profile.username}</p>
 
-</section>
+          <div className="mt-3 flex flex-wrap justify-center sm:justify-start gap-4 text-sm text-gray-700">
+            <span>Rank: {profile.ranking}</span>
+            <span>Reputation: {profile.reputation}</span>
 
+            {profile.school && <span>School: {profile.school}</span>}
+          </div>
+        </div>
+      </section>
 
-    {/* SOLVED */}
-    <section className="mx-auto max-w-4xl mt-8 bg-white rounded-2xl shadow-sm border border-gray-200 p-6 md:p-8">
+      {/* Recently Solved */}
+      <section className="mx-auto max-w-4xl mt-8 bg-white rounded-2xl shadow-sm p-6 md:p-8">
 
-      <h2 className="text-lg md:text-xl font-semibold mb-4 flex items-center gap-2">
-        Recently Solved
-      </h2>
+        <h2 className="text-xl font-semibold mb-4">
+          Recently Solved
+        </h2>
 
-      <ul className="space-y-2">
+        {solved.length > 0 ? (
+          <ul className="space-y-2">
+            {solved.map((problem, index) => (
+              <li
+                key={`${problem.title}-${index}`}
+                className="px-3 py-2 rounded-lg bg-gray-50 border text-gray-700"
+              >
+                {problem.title}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-gray-500">No recently solved problems found.</p>
+        )}
+      </section>
 
-        {solved.map((p) => (
-          <li
-            key={p.title}
-            className="px-3 py-2 rounded-lg bg-gray-50 border border-gray-200 text-gray-700 hover:bg-gray-100 transition"
+      {/* Suggestions Button */}
+      <div className="mt-8 flex justify-center">
+        <button
+          onClick={() => {
+            const shouldShow = !showSuggestions;
+            setShowSuggestions(shouldShow);
+
+            if (shouldShow && suggested.length === 0) {
+              fetchSuggestions();
+            }
+          }}
+          className="px-6 py-2 rounded-full bg-yellow-400 font-medium hover:bg-yellow-500 transition"
+        >
+          {showSuggestions ? "Hide" : "Show"} Suggestions
+        </button>
+      </div>
+
+      {/* Replace Suggestions */}
+      {showSuggestions && (
+        <div className="mt-4 flex justify-center">
+          <button
+            onClick={() => fetchSuggestions(true)}
+            disabled={suggestionsLoading}
+            className="px-5 py-2 rounded-full border bg-white hover:bg-gray-100 disabled:opacity-50"
           >
-            {p.title}
-          </li>
-        ))}
+            {suggestionsLoading ? "Loading..." : "Replace Suggestions"}
+          </button>
+        </div>
+      )}
 
-      </ul>
-    </section>
+      {/* Recommended Problems */}
+      {showSuggestions && (
+        <section className="mx-auto max-w-4xl mt-8">
 
-    {/* BUTTON */}
-    <div className="mt-8 flex justify-center gap-4">
+          <h2 className="text-xl font-semibold mb-5">
+            Recommended Problems
+          </h2>
 
-  <button
-    onClick={() => setShowSuggestions((p) => !p)}
-    className="px-6 py-2 rounded-full bg-yellow-400 text-black font-medium hover:bg-yellow-500 transition"
-  >
-    {showSuggestions ? "Hide" : "Show"} Suggestions
-  </button>
+          {suggestionsLoading && suggested.length === 0 ? (
+            <p className="text-center text-gray-600">
+              Generating suggestions...
+            </p>
+          ) : suggested.length > 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+              {suggested.map((problem) => (
+                <div
+                  key={problem.title}
+                  className="bg-white border rounded-xl p-5 shadow-sm hover:shadow-md transition"
+                >
+                  <h3 className="font-semibold text-lg mb-2">
+                    {problem.title}
+                  </h3>
 
-</div>
+                  <p className="text-sm text-gray-600">
+                    <strong>Difficulty:</strong> {problem.difficulty}
+                  </p>
 
-    {showSuggestions && suggested.length > 0 && (
-  <div className="mt-4 flex justify-center">
+                  <p className="text-sm text-gray-600">
+                    <strong>Concept:</strong> {problem.concept}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            !suggestionsLoading && (
+              <p className="text-center text-gray-500">
+                No suggestions available.
+              </p>
+            )
+          )}
+        </section>
+      )}
 
-    <button
-      onClick={() => fetchSuggestions(solved, excluded)}
-      disabled={suggestionsLoading}
-      className={`px-5 py-2 rounded-full border text-sm transition
-        ${
-          suggestionsLoading
-            ? "bg-gray-200 text-gray-400 cursor-not-allowed"
-            : "border-gray-300 bg-white hover:bg-gray-100"
-        }`}
-    >
-      {suggestionsLoading ? "Loading..." : " Replace Suggestions"}
-    </button>
+      {/* Change User Modal */}
+      {showModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
 
-  </div>
-)}
-
-
-    {/* SUGGESTIONS */}
-    <section
-      className={`mx-auto max-w-4xl mt-8 transition-all duration-500 ease-out ${
-        showSuggestions
-          ? "opacity-100 translate-y-0"
-          : "opacity-0 translate-y-6 pointer-events-none"
-      }`}
-    >
-
-      <h2 className="text-lg md:text-xl font-semibold mb-5 flex items-center gap-2">
-
-        Recommended Problems
-
-      </h2>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-
-        {suggested.map((p) => (
-          <div
-            key={p.title}
-            className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm hover:shadow-md hover:-translate-y-1 transition-all duration-300"
+          <form
+            onSubmit={handleChangeUser}
+            className="bg-white rounded-2xl w-[90%] max-w-sm p-6 shadow-xl"
           >
-
-            <h3 className="font-semibold text-base mb-2">
-              {p.title}
+            <h3 className="text-lg font-semibold mb-4 text-center">
+              Change LeetCode User
             </h3>
 
-            <div className="text-sm text-gray-600 space-y-1">
+            <input
+              type="text"
+              placeholder="Enter username"
+              value={newUsername}
+              onChange={(e) => setNewUsername(e.target.value)}
+              className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-yellow-400"
+              autoFocus
+            />
 
-              <p>
-                <span className="font-medium text-gray-800">
-                  Difficulty:
-                </span>{" "}
-                {p.difficulty}
-              </p>
+            <div className="mt-5 flex justify-end gap-3">
 
-              <p>
-                <span className="font-medium text-gray-800">
-                  Concept:
-                </span>{" "}
-                {p.concept}
-              </p>
+              <button
+                type="button"
+                onClick={() => setShowModal(false)}
+                className="px-4 py-2 rounded-lg border hover:bg-gray-100"
+              >
+                Cancel
+              </button>
+
+              <button
+                type="submit"
+                disabled={!newUsername.trim()}
+                className="px-4 py-2 rounded-lg bg-yellow-400 hover:bg-yellow-500 font-medium disabled:opacity-50"
+              >
+                Search
+              </button>
 
             </div>
+          </form>
+        </div>
+      )}
 
-          </div>
-        ))}
-
-      </div>
-
-    </section>
-    {/* CHANGE USER MODAL */}
-{showModal && (
-  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-
-    <div className="bg-white rounded-2xl w-[90%] max-w-sm p-6 shadow-xl animate-fadeIn">
-
-      <h3 className="text-lg font-semibold mb-4 text-center">
-        Change LeetCode User
-      </h3>
-
-      <input
-        type="text"
-        placeholder="Enter username"
-        value={newUsername}
-        onChange={(e) => setNewUsername(e.target.value)}
-        className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-yellow-400"
-      />
-
-      <div className="mt-5 flex justify-end gap-3">
-
-        <button
-          onClick={() => setShowModal(false)}
-          className="px-4 py-2 rounded-lg border border-gray-300 hover:bg-gray-100 transition"
-        >
-          Cancel
-        </button>
-
-        <button
-          onClick={handleChangeUser}
-          className="px-4 py-2 rounded-lg bg-yellow-400 hover:bg-yellow-500 transition font-medium"
-        >
-          Search
-        </button>
-
-      </div>
-
-    </div>
-
-  </div>
-)}
-
-
-  </main>
-);
+    </main>
+  );
 }

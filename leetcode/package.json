@@ -13,6 +13,7 @@
     "@mistralai/mistralai": "^1.13.0",
     "lucide-react": "^0.562.0",
     "next": "16.1.1",
+    "openai": "^7.47.0",
     "react": "19.2.3",
     "react-dom": "19.2.3"
   },
